@@ -1,0 +1,427 @@
+{
+  "providers": {
+    "bailian": {
+      "id": "bailian",
+      "name": "Alibaba Bailian (Coding Plan)",
+      "type": "http-api",
+      "baseUrl": "https://coding-intl.dashscope.aliyuncs.com/v1",
+      "apiKey": "",
+      "models": [
+        "qwen3.6-plus",
+        "qwen3.5-plus",
+        "qwen3-coder-plus",
+        "qwen3.6-max-preview",
+        "qwen4.6"
+      ]
+    },
+    "zai": {
+      "id": "zai",
+      "name": "Z.AI (GLM Coding Lite)",
+      "type": "http-api",
+      "baseUrl": "https://api.z.ai/api/coding/paas/v4",
+      "apiKey": "",
+      "models": [
+        "glm-4.7",
+        "glm-4.7-flash",
+        "glm-5",
+        "glm-5-turbo",
+        "glm-5.1"
+      ]
+    },
+    "openrouter": {
+      "id": "openrouter",
+      "name": "OpenRouter (Benchmark)",
+      "type": "http-api",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "apiKey": "",
+      "models": [
+        "owl-alpha",
+        "glm-4.7-flash",
+        "qwen-plus",
+        "gemini-2.5-flash",
+        "claude-sonnet-4.6",
+        "claude-opus-4.6"
+      ]
+    },
+    "claude-cli": {
+      "id": "claude-cli",
+      "name": "Claude Code CLI",
+      "type": "cli-agent",
+      "models": [
+        "cc/claude-sonnet-4-6",
+        "cc/claude-opus-4-7",
+        "cc/claude-haiku-4-5"
+      ],
+      "data_sources": {
+        "supported": [
+          "text",
+          "image",
+          "video",
+          "audio"
+        ],
+        "max_images": 20,
+        "max_video_seconds": 300,
+        "max_audio_seconds": 600,
+        "can_output_image": false
+      },
+      "cliConfig": {
+        "command": "claude",
+        "argsTemplate": [
+          "--print",
+          "--model",
+          "{model}",
+          "-p",
+          "{prompt}"
+        ],
+        "modelFlag": "--model",
+        "inputFormat": "arg",
+        "outputFormat": "stdout-text",
+        "timeoutMs": 300000,
+        "maxTokens": 64000,
+        "maxConcurrent": 1,
+        "modelAlias": {
+          "cc/claude-sonnet-4-6": "claude-sonnet-4-6",
+          "cc/claude-opus-4-7": "claude-opus-4-7",
+          "cc/claude-haiku-4-5": "claude-haiku-4-5"
+        },
+        "healthCheck": {
+          "command": "claude --version",
+          "expectedExitCode": 0
+        },
+        "quota": {
+          "type": "subscription",
+          "windows": [
+            {
+              "name": "5-hour",
+              "durationMs": 18000000,
+              "limit": 0,
+              "lastReset": 0,
+              "used": 0
+            },
+            {
+              "name": "weekly",
+              "durationMs": 604800000,
+              "limit": 0,
+              "lastReset": 0,
+              "used": 0
+            }
+          ]
+        }
+      }
+    },
+    "codex-cli": {
+      "id": "codex-cli",
+      "name": "OpenAI Codex CLI",
+      "type": "cli-agent",
+      "models": [
+        "cx/gpt-5.5-codex",
+        "cx/gpt-5.4-codex",
+        "cx/gpt-5.3-codex",
+        "cx/gpt-4.1"
+      ],
+      "data_sources": {
+        "supported": [
+          "text",
+          "image"
+        ],
+        "max_images": 5
+      },
+      "cliConfig": {
+        "command": "codex",
+        "argsTemplate": [
+          "exec",
+          "-"
+        ],
+        "modelFlag": "--config",
+        "inputFormat": "stdin",
+        "outputFormat": "stdout-text",
+        "timeoutMs": 300000,
+        "maxTokens": 64000,
+        "maxConcurrent": 1,
+        "modelAlias": {
+          "cx/gpt-5.5-codex": "gpt-5.5",
+          "cx/gpt-5.4-codex": "gpt-5.4",
+          "cx/gpt-5.3-codex": "gpt-5.5",
+          "cx/gpt-4.1": "gpt-4.1"
+        },
+        "healthCheck": {
+          "command": "codex --version",
+          "expectedExitCode": 0
+        },
+        "quota": {
+          "type": "subscription",
+          "windows": [
+            {
+              "name": "5-hour",
+              "durationMs": 18000000,
+              "limit": 0,
+              "lastReset": 0,
+              "used": 0
+            },
+            {
+              "name": "weekly",
+              "durationMs": 604800000,
+              "limit": 0,
+              "lastReset": 0,
+              "used": 0
+            }
+          ]
+        }
+      }
+    },
+    "pi-agent": {
+      "id": "pi-agent",
+      "name": "Pi Agent (local)",
+      "type": "cli-agent",
+      "models": [
+        "pi/qwen3.5-plus",
+        "pi/glm-4.7-flash"
+      ],
+      "data_sources": {
+        "supported": [
+          "text",
+          "image"
+        ],
+        "max_images": 3
+      },
+      "cliConfig": {
+        "command": "node",
+        "argsTemplate": [
+          "/root/.pi/agent/src/index.js",
+          "-p",
+          "{prompt}",
+          "--model",
+          "{model}",
+          "--json"
+        ],
+        "modelFlag": "--model",
+        "inputFormat": "arg",
+        "outputFormat": "stdout-json",
+        "timeoutMs": 180000,
+        "maxTokens": 32000,
+        "maxConcurrent": 2,
+        "modelAlias": {
+          "pi/qwen3.5-plus": "qwen3.5-plus",
+          "pi/glm-4.7-flash": "glm-4.7-flash"
+        },
+        "healthCheck": {
+          "command": "ls /root/.pi/agent/src/index.js",
+          "expectedExitCode": 0
+        }
+      }
+    },
+    "hermes-agent": {
+      "id": "hermes-agent",
+      "name": "Hermes Agent (self-improving)",
+      "type": "cli-agent",
+      "models": [
+        "hm/glm-4.7",
+        "hm/glm-4.7-flash"
+      ],
+      "data_sources": {
+        "supported": [
+          "text",
+          "image"
+        ],
+        "max_images": 3
+      },
+      "cliConfig": {
+        "command": "node",
+        "argsTemplate": [
+          "/usr/local/lib/hermes-agent/src/agent.js",
+          "-p",
+          "{prompt}",
+          "--model",
+          "{model}",
+          "--json"
+        ],
+        "modelFlag": "--model",
+        "inputFormat": "arg",
+        "outputFormat": "stdout-json",
+        "timeoutMs": 180000,
+        "maxTokens": 32000,
+        "maxConcurrent": 2,
+        "modelAlias": {
+          "hm/glm-4.7": "glm-4.7",
+          "hm/glm-4.7-flash": "glm-4.7-flash"
+        },
+        "healthCheck": {
+          "command": "ls /usr/local/lib/hermes-agent/src/agent.js",
+          "expectedExitCode": 0
+        }
+      }
+    },
+    "openclaw-agent": {
+      "id": "openclaw-agent",
+      "name": "OpenClaw Agent (sessions_spawn)",
+      "type": "cli-agent",
+      "models": [
+        "oc/bailian/qwen3.5-plus",
+        "oc/zai/glm-4.7-flash"
+      ],
+      "data_sources": {
+        "supported": [
+          "text",
+          "image",
+          "audio"
+        ],
+        "max_images": 5,
+        "max_audio_seconds": 300
+      },
+      "cliConfig": {
+        "command": "openclaw",
+        "argsTemplate": [
+          "agent",
+          "--agent",
+          "main",
+          "--model",
+          "{model}",
+          "--message",
+          "{prompt}",
+          "--timeout",
+          "120",
+          "--json"
+        ],
+        "modelFlag": "--model",
+        "inputFormat": "arg",
+        "outputFormat": "stdout-json",
+        "timeoutMs": 180000,
+        "maxTokens": 32000,
+        "maxConcurrent": 3,
+        "modelAlias": {
+          "oc/bailian/qwen3.5-plus": "bailian/qwen3.5-plus",
+          "oc/zai/glm-4.7-flash": "zai/glm-4.7-flash"
+        }
+      }
+    }
+  },
+  "agents": {
+    "default": {
+      "id": "default",
+      "name": "default",
+      "apiKey": "moma-34f79659c1407dbc",
+      "provider": "moma",
+      "tierConfig": {
+        "trivial": "qwen3.5-plus",
+        "light": "glm-4.7-flash",
+        "moderate": "qwen3-coder-plus",
+        "heavy": "qwen3.6-plus",
+        "intensive": "qwen3.5-plus",
+        "extreme": "qwen3.6-plus"
+      },
+      "benchmarkEnabled": true,
+      "maxTokensPerRequest": 65536,
+      "createdAt": "2026-05-15T14:56:29.494Z",
+      "lastUsed": "2026-05-20T23:48:22.340Z",
+      "requestCount": 23,
+      "totalTokensIn": 5455,
+      "totalTokensOut": 281378
+    },
+    "quality": {
+      "id": "quality",
+      "name": "quality",
+      "apiKey": "moma-09a81c320f10461a",
+      "provider": "moma",
+      "tierConfig": {
+        "trivial": "qwen3.5-plus",
+        "light": "glm-4.7-flash",
+        "moderate": "qwen3-coder-plus",
+        "heavy": "qwen3.6-plus",
+        "intensive": "qwen3.5-plus",
+        "extreme": "qwen3.6-plus"
+      },
+      "benchmarkEnabled": true,
+      "maxTokensPerRequest": 65536,
+      "createdAt": "2026-05-15T14:56:29.484Z",
+      "lastUsed": null,
+      "requestCount": 0,
+      "totalTokensIn": 0,
+      "totalTokensOut": 0
+    },
+    "bmad-dev": {
+      "id": "bmad-dev",
+      "name": "bmad-dev",
+      "apiKey": "moma-0b20b98e90c400ff",
+      "provider": "moma",
+      "tierConfig": {
+        "trivial": "qwen3.5-plus",
+        "light": "glm-4.7-flash",
+        "moderate": "qwen3-coder-plus",
+        "heavy": "qwen3.6-plus",
+        "intensive": "qwen3.5-plus",
+        "extreme": "qwen3.6-plus"
+      },
+      "benchmarkEnabled": false,
+      "maxTokensPerRequest": 65536,
+      "createdAt": "2026-05-15T14:56:29.486Z",
+      "lastUsed": null,
+      "requestCount": 0,
+      "totalTokensIn": 0,
+      "totalTokensOut": 0
+    },
+    "bmad-architect": {
+      "id": "bmad-architect",
+      "name": "bmad-architect",
+      "apiKey": "moma-f4a78c2a15d3873e",
+      "provider": "moma",
+      "tierConfig": {
+        "trivial": "qwen3.5-plus",
+        "light": "glm-4.7-flash",
+        "moderate": "qwen3-coder-plus",
+        "heavy": "qwen3.6-plus",
+        "intensive": "qwen3.5-plus",
+        "extreme": "qwen3.6-plus"
+      },
+      "benchmarkEnabled": false,
+      "maxTokensPerRequest": 66536,
+      "createdAt": "2026-05-15T14:56:29.493Z",
+      "lastUsed": null,
+      "requestCount": 0,
+      "totalTokensIn": 0,
+      "totalTokensOut": 0
+    },
+    "claude-quality": {
+      "id": "claude-quality",
+      "name": "claude-quality",
+      "apiKey": "moma-a1b2c3d4e5f67890",
+      "provider": "claude-cli",
+      "tierConfig": {
+        "trivial": "qwen3.5-plus",
+        "light": "glm-4.7-flash",
+        "moderate": "cc/claude-sonnet-4-6",
+        "heavy": "cc/claude-sonnet-4-6",
+        "intensive": "cc/claude-sonnet-4-6",
+        "extreme": "cc/claude-opus-4-7"
+      },
+      "benchmarkEnabled": true,
+      "maxTokensPerRequest": 65536,
+      "createdAt": "2026-05-17T23:30:00.000Z",
+      "lastUsed": "2026-05-20T23:47:04.868Z",
+      "requestCount": 25,
+      "totalTokensIn": 291,
+      "totalTokensOut": 6547
+    },
+    "codex-heavy": {
+      "id": "codex-heavy",
+      "name": "codex-heavy",
+      "apiKey": "moma-b2c3d4e5f6789012",
+      "provider": "codex-cli",
+      "tierConfig": {
+        "trivial": "qwen3.5-plus",
+        "light": "glm-4.7-flash",
+        "moderate": "qwen3-coder-plus",
+        "heavy": "cx/gpt-5.3-codex",
+        "intensive": "cx/gpt-5.3-codex",
+        "extreme": "cx/gpt-5.3-codex"
+      },
+      "benchmarkEnabled": true,
+      "maxTokensPerRequest": 65536,
+      "createdAt": "2026-05-17T23:30:00.000Z",
+      "lastUsed": "2026-05-20T23:47:49.859Z",
+      "requestCount": 13,
+      "totalTokensIn": 120,
+      "totalTokensOut": 3361
+    }
+  },
+  "defaultAgentId": "default"
+}
