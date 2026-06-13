@@ -55,22 +55,67 @@ function accuracyFor(bounds: number[], data: LabeledScore[]): number {
 }
 
 /**
- * Grid-search 5 strictly-increasing cut points maximising exact accuracy.
- * Coarse grid (0.01 step) — fast and enough given score granularity.
+ * Find 5 strictly-increasing cut points maximising exact accuracy, via dynamic
+ * programming over the candidate grid. Exact-tier accuracy decomposes per
+ * segment (samples of tier t whose score lands in [b_{t-1}, b_t)), so the
+ * optimum is computable in O(tiers × grid²) instead of enumerating all 5-tuples
+ * (the previous nested grid search was ~10⁷ combinations × N samples — minutes
+ * of event-loop blockage when triggered).
  */
-function optimizeBoundaries(data: LabeledScore[]): { bounds: number[]; accuracy: number } {
+export function optimizeBoundaries(data: LabeledScore[]): { bounds: number[]; accuracy: number } {
+  const fallback = { bounds: getTierBoundaries(), accuracy: accuracyFor(getTierBoundaries(), data) };
+  if (data.length === 0) return fallback;
+
+  // Candidate cut points: 0.01-step grid spanning the plausible score range.
   const grid: number[] = [];
-  for (let v = 0.08; v <= 0.7; v += 0.01) grid.push(Number(v.toFixed(3)));
-  let best = { bounds: getTierBoundaries(), accuracy: accuracyFor(getTierBoundaries(), data) };
-  for (const b0 of grid.filter(v => v < 0.3))
-    for (const b1 of grid.filter(v => v > b0 && v < 0.4))
-      for (const b2 of grid.filter(v => v > b1 && v < 0.5))
-        for (const b3 of grid.filter(v => v > b2 && v < 0.6))
-          for (const b4 of grid.filter(v => v > b3 && v < 0.7)) {
-            const acc = accuracyFor([b0, b1, b2, b3, b4], data);
-            if (acc > best.accuracy) best = { bounds: [b0, b1, b2, b3, b4], accuracy: acc };
-          }
-  return best;
+  for (let v = 8; v <= 70; v++) grid.push(v / 100);
+  const G = grid.length;
+  const K = TIERS.length; // 6 tiers → 5 cuts
+
+  // cnt[t][g] = number of samples with label t and score < grid[g]; cnt[t][G] = all.
+  const cnt: number[][] = Array.from({ length: K }, () => new Array(G + 1).fill(0));
+  for (const { score, tier } of data) {
+    if (tier < 0 || tier >= K) continue;
+    for (let g = 0; g < G; g++) {
+      if (score < grid[g]) { for (let h = g; h < G; h++) cnt[tier][h]++; break; }
+    }
+    cnt[tier][G]++;
+  }
+
+  // dp[t][g] = best #correct over tiers 0..t when cut t+1 is placed at grid[g]
+  // (tier t covers scores in [previous cut, grid[g])).
+  const dp: number[][] = Array.from({ length: K - 1 }, () => new Array(G).fill(-1));
+  const parent: number[][] = Array.from({ length: K - 1 }, () => new Array(G).fill(-1));
+  for (let g = 0; g < G; g++) dp[0][g] = cnt[0][g]; // tier 0: scores < grid[g]
+  for (let t = 1; t < K - 1; t++) {
+    for (let g = t; g < G; g++) {
+      for (let p = t - 1; p < g; p++) {
+        if (dp[t - 1][p] < 0) continue;
+        const correct = dp[t - 1][p] + (cnt[t][g] - cnt[t][p]);
+        if (correct > dp[t][g]) { dp[t][g] = correct; parent[t][g] = p; }
+      }
+    }
+  }
+
+  // Close with the last tier (scores ≥ final cut).
+  let bestCorrect = -1;
+  let bestLast = -1;
+  for (let g = K - 2; g < G; g++) {
+    if (dp[K - 2][g] < 0) continue;
+    const correct = dp[K - 2][g] + (cnt[K - 1][G] - cnt[K - 1][g]);
+    if (correct > bestCorrect) { bestCorrect = correct; bestLast = g; }
+  }
+  if (bestLast < 0) return fallback;
+
+  const cuts: number[] = new Array(K - 1);
+  let g = bestLast;
+  for (let t = K - 2; t >= 0; t--) {
+    cuts[t] = grid[g];
+    if (t > 0) g = parent[t][g];
+  }
+
+  const accuracy = bestCorrect / data.length;
+  return accuracy > fallback.accuracy ? { bounds: cuts, accuracy } : fallback;
 }
 
 // ─── Retraining trigger ───────────────────────────────────────────
@@ -135,4 +180,25 @@ export async function retrainIfNeeded(): Promise<RetrainResult> {
     accuracyAfter: best.accuracy,
     boundaries: best.bounds,
   };
+}
+
+// ─── Automatic trigger ────────────────────────────────────────────
+// Called from the gateway after each recorded interaction. Fire-and-forget,
+// with a re-entrancy guard so concurrent requests can't stack retrains.
+
+let _retrainInFlight = false;
+
+export function maybeAutoRetrain(interactionCount: number): void {
+  const cfg = getConfig();
+  const every = cfg.feedback_loop.retrainAfterInteractions;
+  if (_retrainInFlight || every <= 0 || interactionCount === 0 || interactionCount % every !== 0) return;
+  _retrainInFlight = true;
+  retrainIfNeeded()
+    .then(r => {
+      if (r.retrained) {
+        console.log(`🎓 Auto-retrain: ${r.reason} (${((r.accuracyBefore ?? 0) * 100).toFixed(0)}% → ${((r.accuracyAfter ?? 0) * 100).toFixed(0)}%)`);
+      }
+    })
+    .catch(err => console.error(`❌ Auto-retrain failed: ${err.message}`))
+    .finally(() => { _retrainInFlight = false; });
 }

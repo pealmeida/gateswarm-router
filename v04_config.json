@@ -1,5 +1,5 @@
 {
-  "version": "v0.5.1-cli-providers",
+  "version": "v0.5.3-context-fidelity",
   "trained": "2026-05-27T23:59:52.685Z",
   "method": "ensemble-voter-with-feedback-loop",
   "ensemble": {
@@ -223,7 +223,7 @@
     "retrainAfterInteractions": 500,
     "minSamplesPerTier": 50,
     "maxWeightChangePct": 0.2,
-    "llmJudgeModel": "bailian/qwen3.5-plus",
+    "llmJudgeModel": "bailian/qwen3.6-plus",
     "llmJudgeSamplingRate": 0.1,
     "cascadeRetraining": true,
     "cascadeRetrainingSource": "real_feedback_labels",
@@ -235,5 +235,10 @@
     "maxEntries": 10000,
     "ttlMs": 86400000,
     "queryMaxResults": 3
+  },
+  "compression": {
+    "proactiveThresholdPct": 0.25,
+    "minThresholdTokens": 4000,
+    "maxInputTokensAbsolute": 32000
   }
 }

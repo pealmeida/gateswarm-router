@@ -92,7 +92,11 @@ export function startFeedbackAutoFlush(intervalMs = 60000): void {
   _flushInterval = setInterval(flushFeedbackStore, intervalMs);
 }
 
-export function recordFeedback(entry: Omit<FeedbackEntry, 'id' | 'timestamp' | 'promptHash'> & { prompt: string }): void {
+/**
+ * Record an interaction. Returns the entry id — pass it to updateAdequacy()
+ * once the LLM judge produces an adequacy score / actual tier.
+ */
+export function recordFeedback(entry: Omit<FeedbackEntry, 'id' | 'timestamp' | 'promptHash'> & { prompt: string }): string {
   if (!_initialized) initFeedbackStore();
 
   const id = randomBytes(8).toString('hex');
@@ -115,6 +119,8 @@ export function recordFeedback(entry: Omit<FeedbackEntry, 'id' | 'timestamp' | '
 
   // Keep last 10K entries in memory
   if (entries.length > MAX_ENTRIES) entries.splice(0, entries.length - MAX_ENTRIES);
+
+  return id;
 }
 
 export function getInteractionCount(): number {

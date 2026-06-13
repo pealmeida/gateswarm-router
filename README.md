@@ -2,11 +2,34 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Node.js 20+](https://img.shields.io/badge/node-20+-brightgreen.svg)](https://nodejs.org/)
-[![Version](https://img.shields.io/badge/version-0.5.2-blue.svg)](https://github.com/pealmeida/gateswarm-router)
+[![Version](https://img.shields.io/badge/version-0.5.3-blue.svg)](https://github.com/pealmeida/gateswarm-router)
 
 **Self-optimizing LLM routing gateway with Plan/Act dual-model routing. Scores every prompt, picks the cheapest capable model per intent mode, learns from every interaction.**
 
 ---
+
+## What's New in v0.5.3
+
+Context fidelity, real cost caps, and a revived learning loop — fixing features that were
+configured/documented but inert at runtime:
+
+- **Context actually survives turns** — the session key was previously derived from the
+  *latest* prompt (changing every turn), so cross-model continuity never matched. Keys are now
+  stable per conversation; the continuity summary is injected only on a real model switch.
+- **Compression no longer destroys context** — activation moved from ~5% of the usable window
+  (≈9K tokens) to a configurable **25%**, so multi-turn chats aren't lossily summarized at 4–5%
+  utilization. The 32K absolute cap stays as the runaway-session guard.
+- **Per-tier `max_tokens` is enforced on the wire** — tier output budgets (256→8192) were never
+  sent to providers, so output cost was uncapped. Now applied to every request (mode-aware).
+- **Learning loop revived** — a feedback-id mismatch meant LLM-judged adequacy never attached to
+  any interaction, so accuracy/calibration/retraining trained on empty data. Fixed; boundary
+  retraining now also fires automatically (guarded) via an exact DP optimizer.
+- **Session-scoped RAG** — retrieved context is confined to its originating session/agent (was
+  global by keyword); cross-session entries contribute only anonymous routing signal.
+- **CLI tuning takes effect live** — `gateswarm model <tier> …` now changes the default agent's
+  act routing via hot-reload (no restart); config ensemble weights + judge model reach the runtime.
+- **Clean-install boot fixed** — removed an undeclared `dotenv` import (replaced with a tiny
+  zero-dependency `.env` loader).
 
 ## What's New in v0.5.2
 
@@ -142,7 +165,7 @@ Run via `npx tsx src/gateswarm-cli.ts <command>` or alias as `gateswarm`:
 |---------|-------------|
 | `status` | Show gateway status: version, ensemble weights, tier models, feedback buffer, RAG stats |
 | `models` | List all tier models with provider and reasoning toggle |
-| `model <tier> <model> <provider>` | Set the act (primary) model for a tier (saved to `v04_config.json`) |
+| `model <tier> <model> <provider>` | Set the act (primary) model for a tier in `v04_config.json` (hot-reloaded; drives the default agent's act routing, plus fallbacks/`max_tokens`/reasoning for all agents) |
 | `reasoning` | Show `enable_thinking` status for all tiers |
 | `reasoning <tier> on\|off` | Toggle reasoning for a specific tier |
 | `retrain-freq` | Show current retraining frequency |
@@ -239,6 +262,9 @@ Key sections:
 - **`ensemble.weights`** — heuristic (0.55), cascade (0), ragSignal (0.25), historyBias (0.2)
 - **`feedback_loop`** — retraining frequency (default 500), LLM judge model and sampling rate, A/B holdout
 - **`rag`** — max entries (10,000), TTL (24h), query max results
+- **`compression`** — `proactiveThresholdPct` (fraction of the usable window before TurboQuant
+  activates, default 0.25), `minThresholdTokens` (floor, 4,000), `maxInputTokensAbsolute`
+  (hard cap regardless of model window, 32,000)
 
 Edit via CLI commands (`model`, `mode-set`, `reasoning`, `weights`, `retrain-freq`) or directly in `v04_config.json`.
 

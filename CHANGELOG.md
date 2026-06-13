@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] - 2026-06-13
+
+Theme: **context fidelity, real cost caps, and reviving the learning loop.** This
+release fixes a set of bugs where features that were configured and documented were
+silently inert at runtime.
+
+### Fixed
+- **Learning loop was dead.** Each request recorded feedback under a store-generated id
+  but then called `updateAdequacy()` with a *different*, locally-generated id, so the
+  LLM-judged adequacy/actual-tier never attached to any entry. Per-tier accuracy,
+  calibration, and boundary retraining all trained on empty data. `recordFeedback()` now
+  returns the canonical id and the gateway uses it. (`feedback-store.ts`, `moma-gateway.ts`)
+- **Context was not preserved across turns.** The session-continuity key fell back to
+  `agentId + first-100-chars-of-the-latest-prompt`, which changes every turn, so the
+  cross-model continuity summary never matched a prior turn unless the client sent an
+  explicit `session_id`. Keys are now stable per conversation (explicit id, else a hash of
+  the first user message), continuity is injected **only on an actual model switch**, and
+  the session map is bounded with a TTL sweep. (`session-continuity.ts`)
+- **Compression destroyed context at trivial utilization.** The activation threshold was
+  ~5% of the usable window (≈9K tokens on a 200K model), so multi-turn chats were lossily
+  summarized at 4–5% utilization. Raised to a configurable 25% (`compression` config block);
+  the 32K absolute cap remains as the runaway-session/cost guard. (`turboquant-compressor.ts`)
+- **Per-tier `max_tokens` was never sent.** Tiers declared output budgets (256→8192) that
+  never reached the provider, so output cost was effectively uncapped. The tier budget
+  (mode-aware: `plan_max_tokens` in plan mode) is now applied to every HTTP request, sync and
+  streaming, unless the client sets its own. (`moma-gateway.ts`)
+- **RAG could leak context across sessions/agents.** Compressed summaries and interaction
+  summaries were retrieved globally by keyword. Content injection is now scoped to the
+  originating session; cross-session entries still contribute only anonymous tier-routing
+  signal. (`rag-index.ts`, `moma-gateway.ts`)
+- **Ensemble weights / judge model didn't reach the runtime.** CLI/config weight changes wrote
+  to disk but the voter kept a separate in-memory copy; the LLM judge model was hardcoded and
+  ignored config. Config now syncs into the voter on every (re)load, and the judge reads
+  `feedback_loop.llmJudgeModel`. (`v04-config.ts`, `ensemble-voter.ts`, `self-eval.ts`)
+- **`gateswarm model <tier> …` had no effect on live routing.** The default agent now follows
+  the hot-reloaded `v04_config.tier_models` for act/auto routing, so CLI cost-tuning takes
+  effect without a restart, as documented. Named agents keep their explicit profiles.
+- **Gateway couldn't start from a clean install.** `dotenv` was imported but never declared as
+  a dependency. Replaced with a tiny zero-dependency `.env` loader.
+- **Retraining could block the event loop for minutes.** The boundary search enumerated ~10⁷
+  cut-point combinations × N samples. Replaced with an exact O(tiers × grid²) dynamic program;
+  retraining now also fires automatically (guarded/debounced) as feedback accrues.
+
+### Changed
+- Confidence margin now reads the live tier boundaries (was a hardcoded copy that drifted after
+  retraining). Registry counter writes are debounced (were two full-file writes per request).
+  Default LLM judge model set to `bailian/qwen3.6-plus` (anti-circularity), matching what ran.
+
 ## [0.5.2] - 2026-06-06
 
 ### Fixed

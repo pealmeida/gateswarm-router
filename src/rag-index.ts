@@ -30,6 +30,11 @@ export interface RagEntry {
   summary: string;
   originalTokens: number;
   compressedTokens: number;
+  /** v0.5.3: session the summary came from. Content injection is scoped to the
+   *  same session; entries without a sessionKey are never injected as content
+   *  (they may still contribute to the tier-routing signal, which only reads
+   *  tier/adequacy metadata). */
+  sessionKey?: string;
 }
 
 // ─── Persistence Layer ──────────────────────────────────────────
@@ -101,7 +106,7 @@ export function startRagAutoFlush(intervalMs = 60000): void {
 /**
  * Add a gateway interaction entry (after request completion).
  */
-export function addRagEntry(entry: Omit<RagEntry, 'id' | 'timestamp' | 'tags' | 'originalRole'> & { tags?: string[]; originalRole?: string }): string {
+export function addRagEntry(entry: Omit<RagEntry, 'id' | 'timestamp' | 'tags' | 'originalRole'> & { tags?: string[]; originalRole?: string; sessionKey?: string }): string {
   if (!_initialized) initRagIndex();
 
   const id = createHash('sha256')
@@ -131,6 +136,7 @@ export function storeToRag(entry: {
   summary: string;
   tags: string[];
   tier: 'Q0' | 'Q1' | 'Q2';
+  sessionKey?: string;
 }): void {
   if (!_initialized) initRagIndex();
 
@@ -150,18 +156,23 @@ export function storeToRag(entry: {
     summary: entry.summary,
     originalTokens: 0,
     compressedTokens: 0,
+    sessionKey: entry.sessionKey,
   });
 }
 
 /**
  * Query the RAG index by keyword/tag overlap.
  * Matches against both `keywords` (gateway entries) and `tags` (compressor entries).
+ * When `sessionKey` is given, only entries from that session match — content
+ * retrieved for injection must never cross sessions/agents.
  */
-export function queryRag(keywords: string[], maxResults = 3): RagEntry[] {
+export function queryRag(keywords: string[], maxResults = 3, sessionKey?: string): RagEntry[] {
   if (!_initialized) initRagIndex();
 
   const now = Date.now();
-  const active = ragIndex.filter(e => now - e.timestamp < TTL_MS);
+  const active = ragIndex.filter(e =>
+    now - e.timestamp < TTL_MS && (sessionKey === undefined || e.sessionKey === sessionKey)
+  );
 
   const scored = active.map(entry => {
     // Search both keywords and tags for overlap

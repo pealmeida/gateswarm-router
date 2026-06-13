@@ -407,6 +407,15 @@ export interface CompressContextOptions {
   messages: any[];
   targetModel: string;
   reservedTokens?: number;
+  /** Session the conversation belongs to — stamped on RAG entries so that
+   *  retrieved summaries are never injected into a different session. */
+  sessionKey?: string;
+  /** Fraction of the usable window at which compression activates (default 0.05). */
+  proactiveThresholdPct?: number;
+  /** Floor for the activation threshold in tokens (default 4000). */
+  minThresholdTokens?: number;
+  /** Absolute input-token cap regardless of context window (default 32000). */
+  maxInputTokensAbsolute?: number;
 }
 
 export interface CompressResult {
@@ -446,7 +455,10 @@ export function getCWMThreshold(contextWindow: number): number {
 export function turboQuantCompress(
   options: CompressContextOptions,
 ): CompressResult {
-  const { messages, targetModel, reservedTokens: reservedTokensOverride } = options;
+  const { messages, targetModel, reservedTokens: reservedTokensOverride, sessionKey } = options;
+  const proactivePct = options.proactiveThresholdPct ?? PROACTIVE_THRESHOLD;
+  const minThresholdTokens = options.minThresholdTokens ?? MIN_THRESHOLD_TOKENS;
+  const maxInputTokensAbsolute = options.maxInputTokensAbsolute ?? MAX_INPUT_TOKENS_ABSOLUTE;
 
   // Get target model's context window
   const contextWindow = MODEL_CONTEXT_WINDOWS[targetModel] || 200_000;
@@ -521,15 +533,16 @@ export function turboQuantCompress(
     );
 
     // Recurse with capped messages
-    return turboQuantCompress({ messages: cappedMessages, targetModel, reservedTokens: reservedTokensOverride });
+    return turboQuantCompress({ ...options, messages: cappedMessages });
   }
 
-  // Dynamic threshold: scales with model context window (5% base, min 4K, max 50K)
-  // v3.6: Also capped by MAX_INPUT_TOKENS_ABSOLUTE to prevent runaway sessions
+  // Dynamic threshold: scales with model context window (configurable pct of
+  // the usable window, floor minThresholdTokens, ceiling 50K).
+  // Also capped by the absolute input-token limit to prevent runaway sessions.
   const dynamicThreshold = Math.min(
-    MAX_INPUT_TOKENS_ABSOLUTE, // v3.6: absolute cap regardless of model context window
+    maxInputTokensAbsolute, // absolute cap regardless of model context window
     MAX_THRESHOLD_TOKENS,
-    Math.max(MIN_THRESHOLD_TOKENS, Math.floor(maxInputTokens * PROACTIVE_THRESHOLD))
+    Math.max(minThresholdTokens, Math.floor(maxInputTokens * proactivePct))
   );
   const thresholdTokens = dynamicThreshold;
 
@@ -662,6 +675,7 @@ export function turboQuantCompress(
           summary: ragEntry.summary,
           tags: ragEntry.tags,
           tier: ragEntry.tier,
+          sessionKey,
         });
         ragStored++;
       }
@@ -741,9 +755,13 @@ export function turboQuantCompress(
 const CLI_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   // Claude Code (cc/)
   'cc/claude-sonnet-4-6': 200_000,
+  'cc/claude-opus-4-8': 200_000,
+  'cc/claude-opus-4-7': 200_000,
   'cc/claude-opus-4-6': 200_000,
   'cc/claude-haiku-4-5': 200_000,
   // Codex (cx/)
+  'cx/gpt-5.5-codex': 128_000,
+  'cx/gpt-5.4-codex': 128_000,
   'cx/gpt-5.3-codex': 128_000,
   'cx/gpt-4.1': 1_000_000,
   // Pi Agent (pi/)
