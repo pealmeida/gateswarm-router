@@ -77,6 +77,7 @@ export function quickEval(input: EvalInput): number {
 // ─── LLM Judge ─────────────────────────────────────────────
 
 const JUDGE_CACHE = new Map<string, { score: number; tier: string }>();
+const JUDGE_CACHE_MAX = 500;
 
 export async function llmJudge(
   prompt: string,
@@ -94,21 +95,23 @@ export async function llmJudge(
     return { adequacy: -1, correctTier: '' }; // not sampled
   }
 
-  // v0.4.4: Anti-circularity — judge uses a different, more capable model
-  // than the one handling the request. Override to qwen3.6-plus (extreme tier).
-  const judgeProvider = 'bailian';
-  const judgeModel = 'qwen3.6-plus';
+  // v0.5.3: the judge model comes from config (feedback_loop.llmJudgeModel,
+  // "provider/model"). It was hardcoded here, so config/CLI changes and the
+  // /health report disagreed with what actually ran.
+  const slash = (llmJudgeModel || '').indexOf('/');
+  const judgeProvider = slash > 0 ? llmJudgeModel.slice(0, slash) : 'bailian';
+  const judgeModel = slash > 0 ? llmJudgeModel.slice(slash + 1) : 'qwen3.6-plus';
 
   const baseUrl = judgeProvider === 'bailian'
-    ? 'https://coding-intl.dashscope.aliyuncs.com/v1'
+    ? process.env.BAILIAN_BASE || 'https://coding-intl.dashscope.aliyuncs.com/v1'
     : judgeProvider === 'zai'
-      ? 'https://api.z.ai/api/coding/paas/v4'
+      ? process.env.ZAI_BASE || 'https://api.z.ai/api/coding/paas/v4'
       : '';
 
   const apiKey = judgeProvider === 'bailian'
     ? process.env.BAILIAN_KEY || ''
     : judgeProvider === 'zai'
-      ? process.env.GLM_API_KEY || ''
+      ? process.env.ZAI_KEY || process.env.GLM_API_KEY || ''
       : '';
 
   if (!baseUrl || !apiKey) {
@@ -143,14 +146,20 @@ Respond with ONLY a JSON object:
     if (!res.ok) return { adequacy: -1, correctTier: '' };
 
     const data = await res.json();
-    const content = data.choices?.[0]?.message?.content || '{}';
-    const parsed = JSON.parse(content);
+    const content: string = data.choices?.[0]?.message?.content || '{}';
+    // Models often wrap JSON in markdown fences — strip before parsing.
+    const jsonText = content.replace(/^[\s\S]*?(\{[\s\S]*\})[\s\S]*$/, '$1');
+    const parsed = JSON.parse(jsonText);
 
     const result = {
       adequacy: Math.max(0, Math.min(1, parsed.adequacy || 0.5)),
       correctTier: parsed.correct_tier || '',
     };
 
+    if (JUDGE_CACHE.size >= JUDGE_CACHE_MAX) {
+      const oldest = JUDGE_CACHE.keys().next().value;
+      if (oldest !== undefined) JUDGE_CACHE.delete(oldest);
+    }
     JUDGE_CACHE.set(cacheKey, { score: result.adequacy, tier: result.correctTier });
     return result;
   } catch {

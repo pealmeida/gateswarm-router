@@ -12,6 +12,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import type { EffortLevel, IntentMode } from './types.js';
 import { setTierBoundaries } from './intent-engine.js';
+import { setEnsembleWeights as setVoterWeights } from './ensemble-voter.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG_FILE = join(__dirname, '../v04_config.json');
@@ -61,6 +62,25 @@ export interface RagConfig {
   queryMaxResults: number;
 }
 
+export interface CompressionConfig {
+  /** Fraction of the model's usable window at which compression activates (0–1). */
+  proactiveThresholdPct: number;
+  /** Floor for the activation threshold (tokens). */
+  minThresholdTokens: number;
+  /** Absolute input-token cap regardless of model context window. */
+  maxInputTokensAbsolute: number;
+}
+
+export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
+  // v0.5.3: was effectively 5% — lossy compression kicked in at ~9K tokens on
+  // 200K-window models, destroying context at 4–5% utilization. Conversations
+  // under the absolute cap fit every routed model; compressing them was pure
+  // information loss. The absolute cap stays as the cost/runaway-session guard.
+  proactiveThresholdPct: 0.25,
+  minThresholdTokens: 4_000,
+  maxInputTokensAbsolute: 32_000,
+};
+
 export interface V04Config {
   version: string;
   trained: string;
@@ -80,12 +100,13 @@ export interface V04Config {
   tier_models: Record<EffortLevel, TierModelConfig>;
   feedback_loop: FeedbackLoopConfig;
   rag: RagConfig;
+  compression?: CompressionConfig;
 }
 
 // ─── Default Config ──────────────────────────────────────
 
 export const DEFAULT_V04_CONFIG: V04Config = {
-  version: 'v0.5.1-cli-providers',
+  version: 'v0.5.3-context-fidelity',
   trained: new Date().toISOString(),
   method: 'ensemble-voter-with-feedback-loop',
   ensemble: {
@@ -132,7 +153,7 @@ export const DEFAULT_V04_CONFIG: V04Config = {
     retrainAfterInteractions: 500,
     minSamplesPerTier: 50,
     maxWeightChangePct: 0.20,
-    llmJudgeModel: 'bailian/qwen3.5-plus',
+    llmJudgeModel: 'bailian/qwen3.6-plus',
     llmJudgeSamplingRate: 0.10,
     cascadeRetraining: true,
     cascadeRetrainingSource: 'real_feedback_labels',
@@ -145,6 +166,7 @@ export const DEFAULT_V04_CONFIG: V04Config = {
     ttlMs: 86400000,
     queryMaxResults: 3,
   },
+  compression: DEFAULT_COMPRESSION_CONFIG,
 };
 
 // ─── Singleton ───────────────────────────────────────────
@@ -165,6 +187,7 @@ export async function loadConfig(): Promise<V04Config> {
     _configLoadedAt = now;
   }
   syncTierBoundaries(_config);
+  syncEnsembleWeightsToVoter(_config);
   return _config;
 }
 
@@ -187,6 +210,20 @@ function syncTierBoundaries(cfg: V04Config): void {
   const cuts = [tb.trivial?.[1], tb.light?.[1], tb.moderate?.[1], tb.heavy?.[1], tb.intensive?.[1]];
   if (cuts.every(c => typeof c === 'number')) {
     setTierBoundaries(cuts as number[]);
+  }
+}
+
+/**
+ * Push the config's ensemble weights into the voter's in-memory weights.
+ * Previously the voter kept its own module-level copy and config/CLI weight
+ * changes never took effect at runtime.
+ */
+function syncEnsembleWeightsToVoter(cfg: V04Config): void {
+  const w = cfg.ensemble?.weights;
+  if (!w) return;
+  const vals = [w.heuristic, w.cascade, w.ragSignal, w.historyBias];
+  if (vals.every(v => typeof v === 'number' && v >= 0)) {
+    setVoterWeights({ heuristic: w.heuristic, cascade: w.cascade, ragSignal: w.ragSignal, historyBias: w.historyBias });
   }
 }
 
@@ -220,6 +257,11 @@ export function setRetrainFrequency(interactions: number): void {
 export function setEnsembleWeights(weights: Partial<EnsembleWeightsConfig>): void {
   const cfg = getConfig();
   cfg.ensemble.weights = { ...cfg.ensemble.weights, ...weights };
+  syncEnsembleWeightsToVoter(cfg);
+}
+
+export function getCompressionConfig(): CompressionConfig {
+  return { ...DEFAULT_COMPRESSION_CONFIG, ...(getConfig().compression ?? {}) };
 }
 
 export function getTierModel(tier: EffortLevel): TierModelConfig | null {

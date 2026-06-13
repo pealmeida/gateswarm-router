@@ -233,18 +233,17 @@ export interface EnsembleInput {
   enableCascade?: boolean;
 }
 
-// Tier cut points — MUST match scoreToEffort()/v04_config.json (v0.5.2 calibration).
-const TIER_BOUNDARIES = [0.21, 0.28, 0.32, 0.37, 0.46];
-
 /**
  * Real confidence from distance to the nearest tier boundary.
  * A score sitting deep inside a tier band is confident; one hugging a
  * boundary is a near coin-flip. ~0.06 margin → full confidence; at the
  * boundary → 0.5. Replaces the old constant 0.7 (which forced 100% escalation).
+ * Uses the live cut points from intent-engine so confidence stays calibrated
+ * after boundary retraining (was a hardcoded copy that silently drifted).
  */
 function confidenceFromMargin(score: number): number {
   let d = Math.min(score, 1 - score);
-  for (const b of TIER_BOUNDARIES) d = Math.min(d, Math.abs(score - b));
+  for (const b of getTierBoundaries()) d = Math.min(d, Math.abs(score - b));
   return Math.max(0.5, Math.min(0.95, 0.5 + (d / 0.06) * 0.45));
 }
 
@@ -272,8 +271,13 @@ export function ensembleVote(input: EnsembleInput): EnsembleVote {
     // Active default path (no trained cascade).
     method = 'heuristic-fallback';
     if (ragPresent) {
-      // Heuristic primary, RAG as a light nudge.
-      finalScore = heuristic * 0.8 + (rag as number) * 0.2 + bias;
+      // Heuristic primary, RAG secondary — mixed by the configured ensemble
+      // weights (renormalized over the two live components). Previously this
+      // was a hardcoded 0.8/0.2, so the documented/configured weights were
+      // never applied on the active path.
+      const denom = weights.heuristic + weights.ragSignal;
+      const wH = denom > 0 ? weights.heuristic / denom : 0.8;
+      finalScore = heuristic * wH + (rag as number) * (1 - wH) + bias;
     } else {
       // No RAG context → trust the heuristic directly (full dynamic range).
       finalScore = heuristic + bias;
@@ -327,5 +331,5 @@ export function ensembleVote(input: EnsembleInput): EnsembleVote {
   };
 }
 
-import { scoreToEffort as _scoreToEffort } from './intent-engine.js';
+import { scoreToEffort as _scoreToEffort, getTierBoundaries } from './intent-engine.js';
 export const scoreToEffort = _scoreToEffort;

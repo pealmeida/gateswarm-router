@@ -1,8 +1,29 @@
 #!/usr/bin/env tsx
-import * as dotenv from 'dotenv';
-dotenv.config({ path: new URL('../.env', import.meta.url).pathname });
+// Zero-dependency .env loader ('dotenv' was imported but never declared in
+// package.json, so a fresh `npm install && npm start` crashed at import time).
+import { readFileSync } from 'fs';
+try {
+  const envFile = readFileSync(new URL('../.env', import.meta.url), 'utf-8');
+  for (const line of envFile.split('\n')) {
+    const m = line.match(/^\s*([\w.-]+)\s*=\s*(.*)\s*$/);
+    if (!m || line.trimStart().startsWith('#')) continue;
+    const value = m[2].replace(/^(['"])(.*)\1$/, '$2');
+    if (process.env[m[1]] === undefined) process.env[m[1]] = value;
+  }
+} catch { /* no .env file — rely on process env */ }
 /**
- * GateSwarm MoMA Router v0.5.2 — Multi-Agent API Gateway
+ * GateSwarm MoMA Router v0.5.3 — Multi-Agent API Gateway
+ *
+ * v0.5.3: Context-fidelity + cost-cap + learning-loop fixes
+ *   - Stable session keys (continuity survives turns); switch-gated injection
+ *   - Session-scoped RAG retrieval (no cross-session/agent context leakage)
+ *   - Compression activation raised from ~5% to a configurable 25% of the
+ *     usable window (was destroying context at trivial utilization)
+ *   - Per-tier max_tokens enforced on every request (cost cap was inert)
+ *   - Feedback id round-trip fixed → self-eval/retraining loop revived
+ *   - Auto-retrain trigger wired into the request path (guarded, debounced)
+ *   - Config ensemble weights + judge model now reach the runtime
+ *   - Zero-dependency .env loader (removed undeclared `dotenv` import)
  *
  * v0.5.1: Direct Routing Bypass
  *   - Skip complexity scoring and route directly to user-specified provider/model
@@ -55,8 +76,9 @@ import { scoreIntent as scoreIntentV04 } from './intent-engine-v04.js';
 import { recordFeedback, getInteractionCount, getFeedbackEntries, getTierAccuracy, shouldRetrain, initFeedbackStore, startFeedbackAutoFlush, updateAdequacy } from './feedback-store.js';
 import { selfEvaluate } from './self-eval.js';
 import { addRagEntry, initRagIndex, startRagAutoFlush } from './rag-index.js';
-import { retrainIfNeeded, getActiveWeights } from './retraining.js';
-import { getConfig, getTierModel, getAllTierModels, getReasoningStatus, saveConfig, getTierModelForMode, detectIntentMode } from './v04-config.js';
+import { retrainIfNeeded, getActiveWeights, maybeAutoRetrain } from './retraining.js';
+import { getConfig, getTierModel, getAllTierModels, getReasoningStatus, saveConfig, getTierModelForMode, detectIntentMode, getCompressionConfig } from './v04-config.js';
+import { resolveSessionId, getContinuity, updateContinuity, buildContinuityNote, startContinuitySweep } from './session-continuity.js';
 import type { EffortLevel, IntentMode } from './types.js';
 import { agentRegistry, AgentConfig } from './agent-registry.js';
 import { estimateTokens } from './token-estimator.js';
@@ -140,6 +162,7 @@ function resolveProviderId(prefix: string): string | null {
     'cc': 'claude-cli', 'cx': 'codex-cli',
     'pi': 'pi-agent', 'hm': 'hermes-agent', 'oc': 'openclaw-agent',
     'bailian': 'bailian', 'zai': 'zai', 'openrouter': 'openrouter',
+    'opencodego': 'opencodego',
     'claude-cli': 'claude-cli', 'codex-cli': 'codex-cli',
     'pi-agent': 'pi-agent', 'hermes-agent': 'hermes-agent',
     'openclaw-agent': 'openclaw-agent',
@@ -351,61 +374,9 @@ function sanitizeMessages(msgs: any[]): any[] {
   return [...systemMsgs, ...merged];
 }
 
-// ─── Context Continuity (v0.4.4) ──────────────────────
-// Tracks per-session summaries across model switches so that
-// when the router changes models between turns, the new model
-// gets a summary of what the previous model discussed.
-
-interface SessionContinuity {
-  summary: string;      // LLM-agnostic summary of the conversation
-  lastTier: string;     // tier of the last response
-  lastModel: string;    // model used for the last response
-  keyDecisions: string[];  // important decisions/conclusions
-  updatedAt: number;
-}
-
-const sessionContinuity = new Map<string, SessionContinuity>();
-
-function getContinuity(sessionId: string): SessionContinuity | null {
-  const entry = sessionContinuity.get(sessionId);
-  // Expire after 1 hour of inactivity
-  if (entry && Date.now() - entry.updatedAt > 3600000) {
-    sessionContinuity.delete(sessionId);
-    return null;
-  }
-  return entry ?? null;
-}
-
-function updateContinuity(sessionId: string, tier: string, model: string, responseText: string): void {
-  const existing = sessionContinuity.get(sessionId);
-  const keyDecisions = extractKeyDecisions(responseText);
-  sessionContinuity.set(sessionId, {
-    summary: existing
-      ? `${existing.summary}\n[Turn: ${tier}→${model}] ${responseText.slice(0, 300)}`
-      : `[Turn: ${tier}→${model}] ${responseText.slice(0, 300)}`,
-    lastTier: tier,
-    lastModel: model,
-    keyDecisions: existing
-      ? [...existing.keyDecisions, ...keyDecisions].slice(-10)
-      : keyDecisions,
-    updatedAt: Date.now(),
-  });
-}
-
-function extractKeyDecisions(text: string): string[] {
-  const decisions: string[] = [];
-  const patterns = [
-    /(?:decision|conclusion|therefore|resolved|agreed|final)[:\s]*(.+?)(?:\n|$)/gi,
-    /(?:the answer is|key point|important|note that)[:\s]*(.+?)(?:\n|$)/gi,
-  ];
-  for (const pattern of patterns) {
-    let match;
-    while ((match = pattern.exec(text)) !== null) {
-      decisions.push(match[1].trim().slice(0, 150));
-    }
-  }
-  return decisions;
-}
+// ─── Context Continuity ────────────────────────────────
+// Lives in session-continuity.ts (v0.5.3): stable session keys, switch-gated
+// injection, bounded memory.
 
 // ─── Helpers ───────────────────────────────────────────
 
@@ -572,50 +543,67 @@ async function handleChatCompletion(req: IncomingMessage, res: ServerResponse, a
   let score = v04Score.value;
   let effort: EffortLevel = v04Score.tier ?? 'moderate';
 
-  // ─── v0.4.4: Context Continuity Anchor ─────────────────────
-  // Extract session ID from request body or generate from agent+prompt hash
-  const sessionId = body.session_id
-    || body.session
-    || `${agent.id}:${promptText.slice(0, 100)}`;
+  // ─── Context Continuity Anchor ─────────────────────────────
+  // Stable per-conversation key (explicit session id, else hash of the first
+  // user message). The old fallback keyed on the LATEST prompt text, so it
+  // changed every turn and continuity never survived a model switch.
+  const sessionId = resolveSessionId(body, req.headers, agent.id, messages);
 
   const modeDetection = detectIntentMode(promptText);
   const activeMode: IntentMode = modeOverride ?? modeDetection.mode;
   const tierModelConfig = getTierModelForMode(effort, activeMode);
 
-  const continuity = getContinuity(sessionId);
-  if (continuity && continuity.lastModel !== (tierModelConfig?.model ?? '')) {
-    // Model switch detected — inject continuity summary
-    console.log(`🔄 [${agent.name}] Model switch: ${continuity.lastModel} → ${tierModelConfig?.model}`);
-  }
-
   const resolved = agentRegistry.resolveModel(agent, effort);
   let providerId = resolved.providerId;
   let model = resolved.model;
+  const rawTier = getTierModel(effort);
+  // v0.5.3: the DEFAULT agent (used whenever no agent API key is supplied — the
+  // common path) follows the hot-reloaded v04_config.tier_models for act/auto
+  // routing. This is the source the `gateswarm model <tier> …` and `mode-set`
+  // CLI commands write, so live cost-tuning now takes effect without a restart
+  // and matches the documented behaviour. Named agents keep their explicit
+  // per-agent profiles (e.g. the `quality` profile routing heavy→Claude).
+  if (activeMode !== 'plan' && agent.id === 'default' && tierModelConfig) {
+    providerId = tierModelConfig.provider;
+    model = tierModelConfig.model;
+  }
   // v0.5.2 fix: in plan mode, actually dispatch to the tier's configured plan
   // model/provider. Previously tierModelConfig was computed but never used as the
   // primary target — plan mode only flipped X-Mode headers while still routing to
-  // the act model. The act/auto path keeps per-agent resolveModel routing.
-  const rawTier = getTierModel(effort);
+  // the act model.
   if (activeMode === 'plan' && rawTier?.plan_model && tierModelConfig) {
     providerId = tierModelConfig.provider;
     model = tierModelConfig.model;
   }
   console.log(`🧠 [${agent.name}] Score: ${score.toFixed(3)} → ${effort} (${activeMode}) → ${providerId}/${model}`);
-  const interactionId = `${agent.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-  // ─── TurboQuant Context Compression v3.5 ──────────────────
-  // Auto-compact with dynamic thresholds per model context window
+  const continuity = getContinuity(sessionId);
+  // Continuity note only when the routed model differs from the one that
+  // answered the previous turn (lastModel is stored as "provider/model").
+  const continuityNote = buildContinuityNote(continuity, `${providerId}/${model}`);
+  if (continuityNote) {
+    console.log(`🔄 [${agent.name}] Model switch: ${continuity!.lastModel} → ${providerId}/${model}`);
+  }
+
+  // ─── TurboQuant Context Compression ───────────────────────
+  // Auto-compact with config-driven thresholds per model context window
+  const compressionCfg = getCompressionConfig();
   const compressionResult = turboQuantCompress({
     messages,
     targetModel: model,
+    sessionKey: sessionId,
+    proactiveThresholdPct: compressionCfg.proactiveThresholdPct,
+    minThresholdTokens: compressionCfg.minThresholdTokens,
+    maxInputTokensAbsolute: compressionCfg.maxInputTokensAbsolute,
     // reservedTokens omitted — compressor computes dynamically per model
   });
 
   // FIX v3.5: compressedMessages declared BEFORE RAG injection (was after → crash)
   const compressedMessages = compressionResult.messages;
 
-  // RAG retrieval: inject relevant compressed context if available
-  // v0.4.4: Also inject continuity summary if model switch detected
+  // RAG retrieval: inject relevant compressed context if available.
+  // Scoped to THIS session — compressed summaries from other sessions/agents
+  // must never be injected into the conversation (cross-session leakage).
   // IMPORTANT: Only inject BEFORE the first non-system message to avoid
   // "system message mid-conversation" errors from Bailian (code 1214)
   if (compressionResult.compressionRatio > 1.0 && ragIndex.length > 0) {
@@ -624,7 +612,7 @@ async function handleChatCompletion(req: IncomingMessage, res: ServerResponse, a
     const uniqueKeywords = [...new Set(promptKeywords)].slice(0, 10) as string[];
 
     if (uniqueKeywords.length > 0) {
-      const relevantEntries = queryRag(uniqueKeywords, 3);
+      const relevantEntries = queryRag(uniqueKeywords, getConfig().rag.queryMaxResults, sessionId);
       if (relevantEntries.length > 0) {
         const ragContext = relevantEntries
           .map(e => `[Retrieved context from ${e.originalRole}: ${e.summary}]`)
@@ -648,23 +636,22 @@ async function handleChatCompletion(req: IncomingMessage, res: ServerResponse, a
     }
   }
 
-  // v0.4.4: Inject continuity summary if available and model switched
-  if (continuity && continuity.keyDecisions.length > 0) {
-    const continuitySummary = `\n\nContinuity from previous turn (${continuity.lastTier}→${continuity.lastModel}):\n` +
-      continuity.keyDecisions.slice(-3).map(d => `- ${d}`).join('\n');
+  // Inject continuity note ONLY when the model actually switched since the
+  // previous turn (injecting every turn pollutes context and wastes tokens).
+  if (continuityNote) {
     const firstSystemIdx = compressedMessages.findIndex((m: any) => m.role === 'system');
     if (firstSystemIdx >= 0) {
       const existing = typeof compressedMessages[firstSystemIdx].content === 'string'
         ? compressedMessages[firstSystemIdx].content
         : '';
-      compressedMessages[firstSystemIdx].content = existing + continuitySummary;
+      compressedMessages[firstSystemIdx].content = existing + '\n\n' + continuityNote;
     } else {
       compressedMessages.unshift({
         role: 'system',
-        content: continuitySummary.trim(),
+        content: continuityNote,
       });
     }
-    console.log(`🔗 [${agent.name}] Continuity: ${continuity.keyDecisions.length} decisions preserved`);
+    console.log(`🔗 [${agent.name}] Continuity: ${continuity!.keyDecisions.length} decisions preserved across model switch`);
   }
 
   if (compressionResult.compressionRatio > 1.0) {
@@ -782,7 +769,7 @@ async function handleChatCompletion(req: IncomingMessage, res: ServerResponse, a
 
     return handleCliProvider(
       providerId, model, agent, messages, effort,
-      compressionResult, promptText, res, score,
+      compressionResult, promptText, res, score, sessionId,
     );
   }
   if (isCli && agent.id === providerId) {
@@ -810,6 +797,13 @@ async function handleChatCompletion(req: IncomingMessage, res: ServerResponse, a
       payload.enable_thinking = true;
     } else if (payload.enable_thinking !== undefined) {
       delete payload.enable_thinking;
+    }
+    // v0.5.3: enforce the tier's output budget (mode-aware: plan_max_tokens in
+    // plan mode). This was configured per tier but never applied to the request,
+    // so the documented per-tier cost caps were inert. Client-specified
+    // max_tokens always wins.
+    if (payload.max_tokens === undefined && typeof tierModel?.max_tokens === 'number' && tierModel.max_tokens > 0) {
+      payload.max_tokens = tierModel.max_tokens;
     }
 
     // ─── 429/503 Fallback Chain: try primary then fallback_models from config ───
@@ -914,7 +908,7 @@ async function handleChatCompletion(req: IncomingMessage, res: ServerResponse, a
         });
         clearTimeout(reqTimeoutId);
 
-        if (resp.status === 429 || resp.status === 1305 || resp.status === 1308) {
+        if (resp.status === 429) {
           console.log(`⚠️  [${agent.name}] ${target.label} rate-limited (${resp.status}), trying fallback...`);
           continue;
         }
@@ -963,9 +957,12 @@ async function handleChatCompletion(req: IncomingMessage, res: ServerResponse, a
       await agentRegistry.updateUsage(agent.id, tokensIn, tokensOut);
 
       const responseText = data.choices?.[0]?.message?.content || '';
-      const feedbackId = `${agent.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-      recordFeedback({
+      // v0.5.3 fix: use the id generated by the feedback store. Previously a
+      // separately-generated id was passed to updateAdequacy(), which never
+      // matched any entry — so actualTier/adequacy were never recorded and the
+      // entire feedback→retraining loop was silently dead.
+      const feedbackId = recordFeedback({
         prompt: promptText,
         predictedTier: effort,
         actualTier: null,
@@ -976,6 +973,7 @@ async function handleChatCompletion(req: IncomingMessage, res: ServerResponse, a
         userSatisfaction: null,
         score,
       });
+      maybeAutoRetrain(getInteractionCount());
 
       selfEvaluate({
         prompt: promptText,
@@ -1018,6 +1016,7 @@ async function handleChatCompletion(req: IncomingMessage, res: ServerResponse, a
         summary: responseText.slice(0, 200),
         originalTokens: tokensIn,
         compressedTokens: compressionResult.compressedTokens,
+        sessionKey: sessionId,
       });
 
       updateContinuity(sessionId, effort, `${actualTarget.providerId}/${actualTarget.model}`, responseText);
@@ -1052,7 +1051,7 @@ async function handleChatCompletion(req: IncomingMessage, res: ServerResponse, a
       console.log(`📝 [${agent.name}] Streaming disabled for CLI provider ${providerId}, using sync dispatch`);
       return handleCliProvider(
         providerId, model, agent, messages, effort,
-        compressionResult, promptText, res, score,
+        compressionResult, promptText, res, score, sessionId,
       );
     }
     if (agentRegistry.isCliProvider(providerId) && agent.id === providerId) {
@@ -1061,6 +1060,14 @@ async function handleChatCompletion(req: IncomingMessage, res: ServerResponse, a
     // For streaming, compress before forwarding
     const compressedBody: any = { ...body, model, messages: compressedMessages };
     // v0.4.1: Both Bailian and ZAI support tool calling — pass tools through
+    // v0.5.3: apply the tier's output budget (same cost cap as the sync path).
+    const streamTier = tierModelConfig ?? getTierModel(effort);
+    if (compressedBody.max_tokens === undefined && typeof streamTier?.max_tokens === 'number' && streamTier.max_tokens > 0) {
+      compressedBody.max_tokens = streamTier.max_tokens;
+    }
+    if (!(streamTier?.enable_thinking === true && providerId === 'zai')) {
+      delete compressedBody.enable_thinking;
+    }
     await forwardToProvider(providerId, model, compressedBody, res);
   }
 }
@@ -1082,6 +1089,7 @@ async function handleCliProvider(
   promptText: string,
   res: ServerResponse,
   score: number = 0,
+  sessionId?: string,
 ): Promise<void> {
   const cliConfig = agentRegistry.getCliProviderConfig(providerId);
   if (!cliConfig) {
@@ -1143,9 +1151,8 @@ async function handleCliProvider(
     // Update agent usage
     await agentRegistry.updateUsage(agent.id, tokensIn, tokensOut);
 
-    // Record feedback
-    const feedbackId = `${agent.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    recordFeedback({
+    // Record feedback (id from the store — see updateAdequacy wiring fix)
+    const feedbackId = recordFeedback({
       prompt: promptText,
       predictedTier: effort,
       actualTier: null,
@@ -1156,6 +1163,7 @@ async function handleCliProvider(
       userSatisfaction: null,
       score,
     });
+    maybeAutoRetrain(getInteractionCount());
 
     // Self-eval (non-blocking)
     selfEvaluate({
@@ -1183,10 +1191,12 @@ async function handleCliProvider(
       summary: result.content.slice(0, 200),
       originalTokens: tokensIn,
       compressedTokens: compressionResult.compressedTokens,
+      sessionKey: sessionId,
     });
 
-    const sessionId = `${agent.id}:${promptText.slice(0, 100)}`;
-    updateContinuity(sessionId, effort, `${providerId}/${result.model}`, result.content);
+    if (sessionId) {
+      updateContinuity(sessionId, effort, `${providerId}/${result.model}`, result.content);
+    }
 
     // Benchmark logging
     if (agent.benchmarkEnabled) {
@@ -1252,10 +1262,11 @@ async function init() {
   initRagIndex();
   startFeedbackAutoFlush();
   startRagAutoFlush();
+  startContinuitySweep();
   console.log('📦 Persistence: feedback + RAG stores initialized');
 
   const agents = agentRegistry.getAgents();
-  console.log(`🚀 GateSwarm MoMA Router v0.5.2 (Plan/Act + CLI Providers) starting on :${PORT}`);
+  console.log(`🚀 GateSwarm MoMA Router v0.5.3 (Plan/Act + CLI Providers) starting on :${PORT}`);
   console.log(`📊 Providers: ${agentRegistry.getProviders().map(p => p.id).join(', ')}`);
   console.log(`🤖 Registered agents: ${agents.map(a => a.name).join(', ')}`);
 
@@ -1286,11 +1297,11 @@ async function init() {
         const agents = agentRegistry.getAgents();
         return jsonResponse(res, 200, {
           status: 'healthy',
-          router: 'GateSwarm MoMA Router v0.5.2 (Plan/Act + CLI Providers)',
+          router: 'GateSwarm MoMA Router v0.5.3 (Plan/Act + CLI Providers)',
           turboquant: 'v3.6',
           ensemble: 'enabled',
           feedback: 'enabled',
-          llmJudge: 'bailian/qwen3.5-plus',
+          llmJudge: getConfig().feedback_loop.llmJudgeModel,
           capabilities: {
             directRouting: true,
             cliProviders: true,
@@ -1651,7 +1662,7 @@ async function init() {
   });
 
   server.listen(PORT, () => {
-    console.log(`✅ GateSwarm MoMA Router v0.5.2 (Plan/Act + CLI Providers) listening on http://localhost:${PORT}`);
+    console.log(`✅ GateSwarm MoMA Router v0.5.3 (Plan/Act + CLI Providers) listening on http://localhost:${PORT}`);
     console.log(`📡 Endpoint: http://localhost:${PORT}/v1/chat/completions`);
     console.log(`📊 Metrics: http://localhost:${PORT}/metrics`);
     console.log(`🤖 Agents: http://localhost:${PORT}/v1/agents`);

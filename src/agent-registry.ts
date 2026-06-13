@@ -468,7 +468,7 @@ export class AgentRegistry {
       if (agent.apiKey === apiKey) {
         agent.lastUsed = new Date().toISOString();
         agent.requestCount++;
-        await this.save();
+        this.scheduleSave();
         return agent;
       }
     }
@@ -618,8 +618,24 @@ export class AgentRegistry {
     if (agent) {
       agent.totalTokensIn += tokensIn;
       agent.totalTokensOut += tokensOut;
-      await this.save();
+      this.scheduleSave();
     }
+  }
+
+  private _saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Debounced save for hot-path counter updates (authenticate/updateUsage run
+   * on every request — writing the full registry JSON to disk twice per
+   * request was pure overhead). Structural changes still save immediately.
+   */
+  private scheduleSave(delayMs = 5000): void {
+    if (this._saveTimer) return;
+    this._saveTimer = setTimeout(() => {
+      this._saveTimer = null;
+      this.save().catch(err => console.error(`❌ Registry save failed: ${err.message}`));
+    }, delayMs);
+    this._saveTimer.unref?.();
   }
 
   private async save(): Promise<void> {
